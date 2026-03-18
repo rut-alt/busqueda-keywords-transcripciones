@@ -11,7 +11,7 @@ st.set_page_config(page_title="Ringover Transcripciones", layout="wide")
 
 
 # -----------------------------
-# Helpers
+# Helpers generales
 # -----------------------------
 def normalize_text(text: str) -> str:
     if pd.isna(text):
@@ -34,6 +34,18 @@ def clean_call_id(value: Any) -> str:
         return ""
     value = str(value).strip().replace('"', "")
     return value
+
+
+def extract_call_id_from_url(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip().replace('"', "")
+    match = re.search(r"call-logs/(\d{19})", text)
+    if match:
+        return match.group(1)
+
+    return ""
 
 
 def make_headers(api_key: str) -> Dict[str, str]:
@@ -205,6 +217,8 @@ def analyze_keyword(df: pd.DataFrame, keyword: str) -> Tuple[pd.DataFrame, pd.Da
 def init_session() -> None:
     if "results_df" not in st.session_state:
         st.session_state.results_df = pd.DataFrame()
+    if "prepared_df" not in st.session_state:
+        st.session_state.prepared_df = pd.DataFrame()
 
 
 # -----------------------------
@@ -212,8 +226,8 @@ def init_session() -> None:
 # -----------------------------
 init_session()
 
-st.title("Ringover · Transcripciones por agente")
-st.caption("Sube un CSV con call_id y agente, descarga transcripciones desde Ringover y analiza keywords por agente.")
+st.title("Ringover · Preparación + Transcripciones")
+st.caption("Primero normaliza el fichero de actividades para obtener call_id y agente. Después descarga transcripciones y analiza keywords.")
 
 with st.sidebar:
     st.header("Configuración")
@@ -228,146 +242,260 @@ with st.sidebar:
     )
     only_success = st.checkbox("Ocultar filas con error", value=False)
 
-uploaded_file = st.file_uploader("Sube el CSV con columnas call_id y agente", type=["csv"])
+tab1, tab2 = st.tabs(["1. Preparar archivo de actividades", "2. Descargar transcripciones"])
 
-col_a, col_b = st.columns([1, 1])
-with col_a:
-    run_button = st.button("Descargar y analizar", type="primary", use_container_width=True)
-with col_b:
-    clear_button = st.button("Limpiar resultados", use_container_width=True)
 
-if clear_button:
-    st.session_state.results_df = pd.DataFrame()
-    st.rerun()
+# -----------------------------
+# TAB 1 - Preparación
+# -----------------------------
+with tab1:
+    st.subheader("Preparar archivo de actividades")
+    st.write("Sube el Excel o CSV exportado de actividades para extraer automáticamente los call_id desde la columna con la URL.")
 
-if uploaded_file is not None:
-    try:
-        source_df = pd.read_csv(uploaded_file, dtype=str)
-    except Exception:
-        source_df = pd.read_csv(uploaded_file, sep="\t", dtype=str)
-
-    source_df.columns = [c.strip() for c in source_df.columns]
-    st.subheader("Vista previa del fichero")
-    st.dataframe(source_df.head(10), use_container_width=True)
-
-    missing = [c for c in ["call_id", "agente"] if c not in source_df.columns]
-    if missing:
-        st.error(f"Faltan columnas obligatorias: {missing}")
-        st.stop()
-
-    if run_button:
-        if not api_key.strip():
-            st.error("Introduce la API key de Ringover.")
-            st.stop()
-
-        work = source_df[["call_id", "agente"]].copy()
-        work["call_id"] = work["call_id"].apply(clean_call_id)
-        work["agente"] = work["agente"].fillna("").astype(str).str.strip()
-        work = work[work["call_id"] != ""].copy()
-        work = work.drop_duplicates(subset=["call_id", "agente"])
-
-        headers = make_headers(api_key)
-        rows: List[Dict[str, Any]] = []
-        progress = st.progress(0)
-        status = st.empty()
-
-        total = len(work)
-        for idx, row in enumerate(work.itertuples(index=False), start=1):
-            call_id = row.call_id
-            agente = row.agente
-            status.info(f"Procesando {idx}/{total} · call_id={call_id} · agente={agente}")
-            rows.append(fetch_one_call(call_id, agente, headers, sleep_ms=int(sleep_ms)))
-            progress.progress(idx / total)
-
-        st.session_state.results_df = pd.DataFrame(rows)
-        status.success("Proceso completado.")
-
-results_df = st.session_state.results_df
-
-if not results_df.empty:
-    results_df = results_df.copy()
-    results_df["tiene_transcripcion"] = results_df["text"].fillna("").astype(str).str.strip() != ""
-
-    total_procesadas = len(results_df)
-    total_con_transcripcion = int(results_df["tiene_transcripcion"].sum())
-    total_sin_transcripcion = total_procesadas - total_con_transcripcion
-    pct_con_transcripcion = round((total_con_transcripcion / total_procesadas) * 100, 2) if total_procesadas else 0
-
-    st.subheader("Resumen de transcripciones")
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Llamadas procesadas", total_procesadas)
-    r2.metric("Con transcripción", total_con_transcripcion)
-    r3.metric("Sin transcripción", total_sin_transcripcion)
-    r4.metric("% con transcripción", f"{pct_con_transcripcion}%")
-
-    view_df = results_df.copy()
-
-    if only_success:
-        view_df = view_df[view_df["error"].isna() | (view_df["error"] == "")]
-
-    st.subheader("Resultado de transcripciones")
-    st.dataframe(view_df, use_container_width=True)
-
-    csv_buffer = io.StringIO()
-    view_df.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
-    st.download_button(
-        "Descargar CSV de transcripciones",
-        data=csv_buffer.getvalue(),
-        file_name="ringover_transcripciones_con_agente.csv",
-        mime="text/csv",
+    activities_file = st.file_uploader(
+        "Sube el fichero de actividades",
+        type=["xlsx", "xls", "csv"],
+        key="activities_uploader",
     )
 
-    if keyword.strip():
-        summary_df, detail_df = analyze_keyword(view_df, keyword)
+    if activities_file is not None:
+        file_name = activities_file.name.lower()
 
-        st.subheader(f"Análisis de keyword: {keyword}")
-        total_calls = len(view_df)
-        calls_with_keyword = int(
-            (
-                view_df["text"]
-                .fillna("")
-                .astype(str)
-                .apply(lambda x: count_mentions(x, keyword) > 0)
-            ).sum()
+        try:
+            if file_name.endswith(".csv"):
+                raw_df = pd.read_csv(activities_file, dtype=str)
+            else:
+                raw_df = pd.read_excel(activities_file, dtype=str)
+        except Exception as e:
+            st.error(f"No se pudo leer el fichero: {e}")
+            st.stop()
+
+        raw_df.columns = [str(c).strip() for c in raw_df.columns]
+
+        st.markdown("### Vista previa del fichero original")
+        st.dataframe(raw_df.head(10), use_container_width=True)
+
+        columns = list(raw_df.columns)
+
+        default_url_idx = columns.index("I") if "I" in columns else min(8, len(columns) - 1)
+        url_col = st.selectbox(
+            "Columna que contiene la URL de la llamada",
+            options=columns,
+            index=default_url_idx if len(columns) > 0 else 0,
         )
-        pct_total = round((calls_with_keyword / total_calls) * 100, 2) if total_calls else 0
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total llamadas", total_calls)
-        m2.metric("Llamadas con keyword", calls_with_keyword)
-        m3.metric("% sobre total", f"{pct_total}%")
+        agent_candidates = [c for c in columns if "agent" in c.lower() or "owner" in c.lower() or "agente" in c.lower() or "user" in c.lower()]
+        default_agent = agent_candidates[0] if agent_candidates else columns[0]
+        agent_col = st.selectbox(
+            "Columna del agente",
+            options=columns,
+            index=columns.index(default_agent) if default_agent in columns else 0,
+        )
 
-        st.markdown("### Resumen por agente")
-        st.dataframe(summary_df, use_container_width=True)
+        prepare_button = st.button("Preparar fichero", type="primary", use_container_width=True)
 
-        summary_csv = io.StringIO()
-        summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+        if prepare_button:
+            prepared_df = raw_df[[url_col, agent_col]].copy()
+            prepared_df = prepared_df.rename(columns={url_col: "url_llamada", agent_col: "agente"})
+            prepared_df["call_id"] = prepared_df["url_llamada"].apply(extract_call_id_from_url)
+            prepared_df["agente"] = prepared_df["agente"].fillna("").astype(str).str.strip()
+
+            prepared_df = prepared_df[prepared_df["call_id"] != ""].copy()
+            prepared_df = prepared_df[["call_id", "agente", "url_llamada"]]
+            prepared_df = prepared_df.drop_duplicates(subset=["call_id", "agente"])
+
+            st.session_state.prepared_df = prepared_df
+
+        if not st.session_state.prepared_df.empty:
+            prepared_df = st.session_state.prepared_df.copy()
+
+            total_filas = len(raw_df)
+            total_validas = len(prepared_df)
+            total_sin_call_id = total_filas - total_validas
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Filas originales", total_filas)
+            c2.metric("Call ID extraídos", total_validas)
+            c3.metric("Filas sin call_id", total_sin_call_id)
+
+            st.markdown("### Fichero preparado")
+            st.dataframe(prepared_df, use_container_width=True)
+
+            csv_prepared = io.StringIO()
+            prepared_df[["call_id", "agente"]].to_csv(csv_prepared, index=False, encoding="utf-8-sig")
+
+            st.download_button(
+                "Descargar CSV preparado",
+                data=csv_prepared.getvalue(),
+                file_name="call_ids_por_agente.csv",
+                mime="text/csv",
+            )
+
+            st.success("Ya tienes el fichero preparado. Puedes ir a la pestaña 2 directamente.")
+
+
+# -----------------------------
+# TAB 2 - Transcripciones
+# -----------------------------
+with tab2:
+    st.subheader("Descargar transcripciones")
+
+    uploaded_file = st.file_uploader(
+        "Sube el CSV con columnas call_id y agente, o usa el preparado en la pestaña 1",
+        type=["csv"],
+        key="transcriptions_uploader",
+    )
+
+    source_df = None
+
+    if not st.session_state.prepared_df.empty:
+        st.info("Se ha detectado un fichero preparado en la pestaña 1. Puedes usarlo directamente.")
+        if st.button("Usar fichero preparado", use_container_width=True):
+            source_df = st.session_state.prepared_df[["call_id", "agente"]].copy()
+            st.session_state["source_df_ready"] = source_df
+
+    if "source_df_ready" in st.session_state:
+        source_df = st.session_state["source_df_ready"]
+
+    if uploaded_file is not None:
+        try:
+            source_df = pd.read_csv(uploaded_file, dtype=str)
+        except Exception:
+            source_df = pd.read_csv(uploaded_file, sep="\t", dtype=str)
+
+    if source_df is not None:
+        source_df.columns = [c.strip() for c in source_df.columns]
+        st.markdown("### Vista previa del fichero a procesar")
+        st.dataframe(source_df.head(10), use_container_width=True)
+
+        missing = [c for c in ["call_id", "agente"] if c not in source_df.columns]
+        if missing:
+            st.error(f"Faltan columnas obligatorias: {missing}")
+            st.stop()
+
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            run_button = st.button("Descargar y analizar", type="primary", use_container_width=True)
+        with col_b:
+            clear_button = st.button("Limpiar resultados", use_container_width=True)
+
+        if clear_button:
+            st.session_state.results_df = pd.DataFrame()
+            st.rerun()
+
+        if run_button:
+            if not api_key.strip():
+                st.error("Introduce la API key de Ringover.")
+                st.stop()
+
+            work = source_df[["call_id", "agente"]].copy()
+            work["call_id"] = work["call_id"].apply(clean_call_id)
+            work["agente"] = work["agente"].fillna("").astype(str).str.strip()
+            work = work[work["call_id"] != ""].copy()
+            work = work.drop_duplicates(subset=["call_id", "agente"])
+
+            headers = make_headers(api_key)
+            rows: List[Dict[str, Any]] = []
+            progress = st.progress(0)
+            status = st.empty()
+
+            total = len(work)
+            for idx, row in enumerate(work.itertuples(index=False), start=1):
+                call_id = row.call_id
+                agente = row.agente
+                status.info(f"Procesando {idx}/{total} · call_id={call_id} · agente={agente}")
+                rows.append(fetch_one_call(call_id, agente, headers, sleep_ms=int(sleep_ms)))
+                progress.progress(idx / total)
+
+            st.session_state.results_df = pd.DataFrame(rows)
+            status.success("Proceso completado.")
+
+    results_df = st.session_state.results_df
+
+    if not results_df.empty:
+        results_df = results_df.copy()
+        results_df["tiene_transcripcion"] = results_df["text"].fillna("").astype(str).str.strip() != ""
+
+        total_procesadas = len(results_df)
+        total_con_transcripcion = int(results_df["tiene_transcripcion"].sum())
+        total_sin_transcripcion = total_procesadas - total_con_transcripcion
+        pct_con_transcripcion = round((total_con_transcripcion / total_procesadas) * 100, 2) if total_procesadas else 0
+
+        st.subheader("Resumen de transcripciones")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Llamadas procesadas", total_procesadas)
+        r2.metric("Con transcripción", total_con_transcripcion)
+        r3.metric("Sin transcripción", total_sin_transcripcion)
+        r4.metric("% con transcripción", f"{pct_con_transcripcion}%")
+
+        view_df = results_df.copy()
+
+        if only_success:
+            view_df = view_df[view_df["error"].isna() | (view_df["error"] == "")]
+
+        st.subheader("Resultado de transcripciones")
+        st.dataframe(view_df, use_container_width=True)
+
+        csv_buffer = io.StringIO()
+        view_df.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
         st.download_button(
-            "Descargar resumen por agente",
-            data=summary_csv.getvalue(),
-            file_name="resumen_keyword_por_agente.csv",
+            "Descargar CSV de transcripciones",
+            data=csv_buffer.getvalue(),
+            file_name="ringover_transcripciones_con_agente.csv",
             mime="text/csv",
         )
 
-        st.markdown("### Detalle de llamadas con coincidencia")
-        st.dataframe(
-            detail_df[
-                [
-                    c for c in [
-                        "call_id",
-                        "agente",
-                        "start_time",
-                        "duration",
-                        "speaker",
-                        "mentions",
-                        "text",
-                        "error",
+        if keyword.strip():
+            summary_df, detail_df = analyze_keyword(view_df, keyword)
+
+            st.subheader(f"Análisis de keyword: {keyword}")
+            total_calls = len(view_df)
+            calls_with_keyword = int(
+                (
+                    view_df["text"]
+                    .fillna("")
+                    .astype(str)
+                    .apply(lambda x: count_mentions(x, keyword) > 0)
+                ).sum()
+            )
+            pct_total = round((calls_with_keyword / total_calls) * 100, 2) if total_calls else 0
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total llamadas", total_calls)
+            m2.metric("Llamadas con keyword", calls_with_keyword)
+            m3.metric("% sobre total", f"{pct_total}%")
+
+            st.markdown("### Resumen por agente")
+            st.dataframe(summary_df, use_container_width=True)
+
+            summary_csv = io.StringIO()
+            summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+            st.download_button(
+                "Descargar resumen por agente",
+                data=summary_csv.getvalue(),
+                file_name="resumen_keyword_por_agente.csv",
+                mime="text/csv",
+            )
+
+            st.markdown("### Detalle de llamadas con coincidencia")
+            st.dataframe(
+                detail_df[
+                    [
+                        c for c in [
+                            "call_id",
+                            "agente",
+                            "start_time",
+                            "duration",
+                            "speaker",
+                            "mentions",
+                            "text",
+                            "error",
+                        ]
+                        if c in detail_df.columns
                     ]
-                    if c in detail_df.columns
-                ]
-            ],
-            use_container_width=True,
-        )
+                ],
+                use_container_width=True,
+            )
 
         st.markdown("### Llamadas sin transcripción")
         sin_transcripcion_df = view_df[~view_df["tiene_transcripcion"]].copy()
@@ -387,5 +515,3 @@ if not results_df.empty:
             ],
             use_container_width=True,
         )
-else:
-    st.info("Sube un CSV, añade tu API key y pulsa ‘Descargar y analizar’.")
