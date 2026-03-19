@@ -61,7 +61,8 @@ def extract_call_id_from_url(value: Any) -> str:
         return ""
 
     text = str(value).strip().replace('"', "")
-    match = re.search(r"call-logs/(\d{19})", text)
+
+    match = re.search(r"call-logs/(\d+)", text)
     if match:
         return match.group(1)
 
