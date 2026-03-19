@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Ringover Transcripciones",
-    page_icon="logo.png",  # tu logo aquí
+    page_icon="LOGOTIPO-AES-05.png",  # tu logo aquí
     layout="wide"
 )
 
